@@ -1,0 +1,81 @@
+---
+name: CI
+
+# Runs on `ci-untrusted-python312`, served for this account by the user-scoped
+# `ci-untrusted-emersonfelipesp` runner. That runner has no service containers
+# and does not fetch actions over the network, which is why this uses `uv` from
+# the image rather than actions/setup-python.
+#
+# Scope: unit tests, lint, and a collection build. The live tests need a NetBox
+# running netbox-openbao plus an OpenBao, which this runner cannot provide;
+# they skip cleanly when their environment is unset. See the README.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: netbox-openbao-ansible-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint, unit tests, and collection build
+    runs-on: ci-untrusted-python312
+    timeout-minutes: 20
+    env:
+      HOME: ${{ github.workspace }}
+      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+      UV_PYTHON_DOWNLOADS: never
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Create the environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v uv
+          uv venv --python 3.12 .venv
+          uv pip install --python .venv/bin/python ansible-core pytest ruff
+
+      - name: Ruff
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/ruff check .
+
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m pytest tests/unit -q
+
+      - name: The lookup's documentation must parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A malformed DOCUMENTATION block only fails when the plugin loads,
+          # which no unit test reaches.
+          COLLECTIONS="$(mktemp -d)/collections"
+          mkdir -p "$COLLECTIONS/ansible_collections/emersonfelipesp"
+          ln -s "$PWD" "$COLLECTIONS/ansible_collections/emersonfelipesp/netbox_openbao"
+          ANSIBLE_COLLECTIONS_PATH="$COLLECTIONS" \
+            .venv/bin/ansible-doc -t lookup emersonfelipesp.netbox_openbao.credential > doc.txt
+          # The two warnings that must never quietly disappear from the docs.
+          grep -q 'no_log' doc.txt
+          grep -qi 'rate limit' doc.txt
+
+      - name: Build the collection
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/ansible-galaxy collection build --output-path dist/

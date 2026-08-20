@@ -1,0 +1,4 @@
+---
+# ansible-core 2.15 is the oldest release with the plugin-options behaviour this
+# lookup relies on. Nothing here needs anything newer.
+requires_ansible: '>=2.15.0'
