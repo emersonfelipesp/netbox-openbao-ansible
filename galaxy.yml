@@ -1,0 +1,26 @@
+---
+namespace: emersonfelipesp
+name: netbox_openbao
+version: 0.1.0
+readme: README.md
+authors:
+  - Emerson Felipe <emerson.felipe@nmultifibra.com.br>
+description: >-
+  Resolve netbox-openbao credentials from NetBox at play time. The material stays
+  in OpenBao; NetBox authorizes and audits every read.
+license:
+  - Apache-2.0
+tags:
+  - netbox
+  - openbao
+  - vault
+  - secrets
+  - credentials
+  - networking
+repository: https://git.nmulti.cloud/emersonfelipesp/netbox-openbao-ansible
+issues: https://git.nmulti.cloud/emersonfelipesp/netbox-openbao-ansible/issues
+build_ignore:
+  - .gitea
+  - .github
+  - tests/output
+  - '*.tar.gz'
