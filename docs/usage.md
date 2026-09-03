@@ -100,4 +100,33 @@ Pass `version=` only when you deliberately want a specific one.
 | `NetBox rejected the token (HTTP 403)` | The token lacks `view_credential` or `reveal_credential`. `add_credential` does not substitute. |
 | `Not found (HTTP 404)` | Either it does not exist, or the token's object-permission constraints exclude it. `netbox-openbao` returns 404 rather than 403 so a response cannot confirm a credential you may not read exists. |
 | `N credentials matched and none is marked primary` | Narrow with `purpose=`, or mark one assignment primary in NetBox. |
+| `N credential(s) are assigned to … but none matches …` | You narrowed with `credential_type=`, `uuid=`, or `name=` and nothing satisfied it. The message lists the types that are present. Note that these filters used to be accepted and ignored alongside an object selector, so a play relying on one was silently served whichever credential was primary. |
 | `No device named "x" in NetBox` | The selector did not resolve. Names are exact. |
+| `No credential assigned to <type> #<id>` | Either nothing is assigned, or that content type is not in the target NetBox's assignable-model allowlist — an assignment cannot exist for a type the allowlist rejects, and the two look identical from here. |
+| `"x" is not a NetBox content-type label` | `assigned_object_type` must be `app_label.model`, for example `netbox_proxbox.proxmoxendpoint`. Caught before the request, so it cannot be mistaken for an empty result. |
+| `assigned_object_id must be a positive integer` | Name resolution is only available for `device`, `virtual_machine`, and `service`. Quote the id: the option is declared `str` so Ansible does not coerce it first, and floats, booleans, whitespace-padded strings, and non-ASCII digits are then refused rather than silently turned into a different object's primary key. |
+
+## Objects beyond devices, VMs, and services
+
+`netbox-openbao`'s assignable-model allowlist is configurable and can be
+extended by an installed plugin, so the three named selectors cannot cover
+everything. Give the content type and the primary key instead:
+
+```yaml
+- name: Resolve the Proxmox endpoint API token
+  ansible.builtin.set_fact:
+    proxmox_api: "{{ lookup('emersonfelipesp.netbox_openbao.credential',
+                            assigned_object_type='netbox_proxbox.proxmoxendpoint',
+                            assigned_object_id='3',
+                            purpose='api') }}"
+  run_once: true
+  delegate_to: localhost
+  no_log: true
+```
+
+Both halves are required — one alone is far more likely to be a mistake than a
+request to ignore it, and ignoring it silently would widen the query to every
+assignment of that type. Mixing this pair with `device`, `virtual_machine`, or
+`service` is an error rather than a precedence rule: two selectors that disagree
+have no correct answer, and picking one would make a play's behaviour depend on
+an ordering nobody wrote down.

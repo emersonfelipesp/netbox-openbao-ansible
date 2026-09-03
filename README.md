@@ -115,17 +115,71 @@ path.
 | Device + purpose | `device='core-sw-01', purpose='login'` |
 | Virtual machine | `virtual_machine='vm-01', purpose='login'` |
 | Service | `service='ssh'` |
+| Any other object type | `assigned_object_type='netbox_proxbox.proxmoxendpoint', assigned_object_id=3` |
 | By ID | `credential_id=142` |
 | By UUID | `uuid='0d2f8f6e-…'` |
 | By name | `lookup(..., 'core-sw-01 login')` |
 
 Devices, VMs, and services accept a name or a numeric ID.
 
+### Object types beyond those three
+
+`netbox-openbao`'s assignable-model allowlist is configurable, and an installed
+plugin can extend it from its own code. So the three friendly selectors above
+cannot be exhaustive without a release of this collection per integration, and
+`assigned_object_type` plus `assigned_object_id` is the escape hatch:
+
+```yaml
+- name: Resolve the Proxmox endpoint API token
+  ansible.builtin.set_fact:
+    proxmox_api: "{{ lookup('emersonfelipesp.netbox_openbao.credential',
+                            assigned_object_type='netbox_proxbox.proxmoxendpoint',
+                            assigned_object_id='3',
+                            purpose='api') }}"
+  run_once: true
+  delegate_to: localhost
+  no_log: true
+```
+
+Both halves are required, and the id must be **ASCII digits naming a positive
+integer**. This collection cannot know which field is the natural key for a model
+it has never heard of, and guessing `name` would fail confusingly on the models
+that do not have one — so name resolution stays limited to devices, VMs, and
+services.
+
+Quote the id, as the example does. The option is declared `str` rather than
+`int` on purpose: Ansible coerces an option to its declared type *before* the
+plugin sees it, and `int` coercion is lossy in exactly the ways that matter —
+`True` becomes `1`, `3.0` becomes `3`, `' 3 '` becomes `3`. A templated value
+that arrived as a boolean or a float would then select a different object and
+hand back its credential rather than failing. Declared `str`, those arrive intact
+and are refused, along with whitespace-padded strings, non-ASCII digits, zero,
+and negatives — all before any request is made.
+
+**The object must be assignable in the target NetBox.** An assignment cannot
+exist for a content type that instance's allowlist rejects, and the symptom is
+indistinguishable from an object that simply has no credential — so the lookup's
+not-found message names the allowlist as a possible cause rather than leaving
+you to guess.
+
 Resolution prefers the assignment marked **primary** — which is exactly what
 `netbox-openbao`'s single-primary-per-(object, purpose) constraint exists to
 make unambiguous. If several match and none is primary, the lookup **fails
 rather than guessing**, because silently taking the first would make a play's
 behaviour depend on database ordering.
+
+`credential_type=`, `uuid=`, and `name=` combine with an object selector and
+narrow the result:
+
+```yaml
+device='core-sw-01', purpose='login', credential_type='ssh-keypair'
+```
+
+If nothing satisfies the constraint the lookup fails and names the types that
+are present, rather than falling back to the primary. That matters because these
+filters were previously accepted and ignored on this path — a play written to
+demand a key was handed whichever credential happened to be primary, with no
+error.
 
 ## What you get back
 

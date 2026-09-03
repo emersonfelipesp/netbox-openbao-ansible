@@ -41,6 +41,37 @@ options:
   service:
     description: Name or numeric ID of an application service the credential is assigned to.
     type: str
+  assigned_object_type:
+    description:
+      - >-
+        NetBox content-type label of the object the credential is assigned to, as
+        C(app_label.model) — for example C(netbox_proxbox.proxmoxendpoint).
+      - >-
+        The escape hatch for any object type beyond I(device), I(virtual_machine), and
+        I(service). netbox-openbao's assignable-model allowlist is configurable and can
+        also be extended by an installed plugin, so those three cannot be exhaustive.
+      - Must be given together with I(assigned_object_id).
+      - >-
+        The object must be assignable in the target NetBox. An assignment cannot exist
+        for a content type that instance's allowlist rejects, and the lookup will report
+        that no credential is assigned.
+    type: str
+  assigned_object_id:
+    description:
+      - Primary key of the assigned object. Must be given together with I(assigned_object_type).
+      - >-
+        Digits only. This collection cannot know which field is the natural key for a
+        model it has never heard of, so name-based resolution stays limited to
+        I(device), I(virtual_machine), and I(service).
+      - >-
+        Declared C(str) rather than C(int) deliberately, and this is load-bearing.
+        Ansible coerces an option to its declared type before the plugin ever sees the
+        value, and C(int) coercion is lossy in exactly the ways that matter here:
+        C(True) becomes C(1) and C(3.0) becomes C(3). A templated value that arrived as
+        a boolean or a float would then select a different object and return its
+        credential. Declared C(str), those arrive as C("True") and C("3.0") and are
+        refused.
+    type: str
   purpose:
     description:
       - Narrow the assignment by purpose, for example C(login), C(enable), or C(oob).
@@ -146,6 +177,19 @@ EXAMPLES = r'''
     cred: "{{ lookup('emersonfelipesp.netbox_openbao.credential',
                      uuid='0d2f8f6e-1c4b-4a3f-9b2e-8a1d5c7e4b90') }}"
   no_log: true
+
+# An object type beyond device, virtual_machine, and service — here a Proxmox
+# endpoint owned by the netbox-proxbox plugin. Content-type label plus primary
+# key, because this collection cannot know that model's natural key.
+- name: Resolve the Proxmox endpoint API token
+  ansible.builtin.set_fact:
+    proxmox_api: "{{ lookup('emersonfelipesp.netbox_openbao.credential',
+                            assigned_object_type='netbox_proxbox.proxmoxendpoint',
+                            assigned_object_id='3',
+                            purpose='api') }}"
+  run_once: true
+  delegate_to: localhost
+  no_log: true
 '''
 
 RETURN = r'''
@@ -206,6 +250,8 @@ class LookupModule(LookupBase):
                 uuid=self.get_option('uuid'),
                 name=name,
                 credential_type=self.get_option('credential_type'),
+                assigned_object_type=self.get_option('assigned_object_type'),
+                assigned_object_id=self.get_option('assigned_object_id'),
             )
 
             if not credentials:
