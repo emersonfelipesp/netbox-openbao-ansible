@@ -1,3 +1,53 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-openbao-ansible"
+version = "0.1.0"
+description = "Ansible collection for resolving netbox-openbao credentials from NetBox"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [
+  { name = "Emerson Felipe", email = "emerson.felipe@nmultifibra.com.br" },
+]
+dependencies = ["ansible-core>=2.15"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: Ansible",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/emersonfelipesp/netbox-openbao-ansible"
+Documentation = "https://github.com/emersonfelipesp/netbox-openbao-ansible#readme"
+Issues = "https://github.com/emersonfelipesp/netbox-openbao-ansible/issues"
+Repository = "https://github.com/emersonfelipesp/netbox-openbao-ansible"
+
+[tool.setuptools]
+packages = [
+  "ansible_collections.emersonfelipesp.netbox_openbao",
+  "ansible_collections.emersonfelipesp.netbox_openbao.plugins",
+  "ansible_collections.emersonfelipesp.netbox_openbao.plugins.lookup",
+  "ansible_collections.emersonfelipesp.netbox_openbao.plugins.module_utils",
+]
+include-package-data = false
+
+[tool.setuptools.package-dir]
+"ansible_collections.emersonfelipesp.netbox_openbao" = "."
+
+[tool.setuptools.package-data]
+"ansible_collections.emersonfelipesp.netbox_openbao" = [
+  "LICENSE",
+  "README.md",
+  "galaxy.yml",
+  "docs/*.md",
+  "meta/*.yml",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

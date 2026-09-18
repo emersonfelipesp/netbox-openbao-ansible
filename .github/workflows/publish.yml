@@ -1,0 +1,188 @@
+name: Validate and publish a final release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing final release tag at canonical main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netbox-openbao-ansible-publish-${{ github.event.release.tag_name || inputs.tag }}-${{ github.event_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate-build:
+    name: Validate the tag and build once
+    if: ${{ github.repository == 'emersonfelipesp/netbox-openbao-ansible' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      source_sha: ${{ steps.ref.outputs.source_sha }}
+      target: ${{ steps.policy.outputs.target }}
+      version: ${{ steps.ref.outputs.version }}
+    steps:
+      - name: Checkout canonical release policy
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Select the explicit publication target
+        id: policy
+        env:
+          RELEASE_TARGET: ${{ github.event_name == 'release' && 'pypi' || 'testpypi' }}
+        run: |
+          set -euo pipefail
+          IFS=$'\t' read -r target repository_url < <(
+            python scripts/release_policy.py route --target "$RELEASE_TARGET"
+          )
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "repository_url=$repository_url" >> "$GITHUB_OUTPUT"
+
+      - name: Validate the existing final tag against canonical main
+        id: ref
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(\.post[0-9]+)?$'
+          git fetch --force --no-tags origin \
+            "+refs/heads/main:refs/release-policy/main" \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          python scripts/release_policy.py validate-ref \
+            --repository . --tag "$RELEASE_TAG" \
+            --main-ref refs/release-policy/main --github-output "$GITHUB_OUTPUT"
+
+      - name: Checkout the validated release source
+        env:
+          SOURCE_SHA: ${{ steps.ref.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$SOURCE_SHA" | grep -Eq '^[a-f0-9]{40}$'
+          git checkout --detach --force "$SOURCE_SHA"
+          test "$SOURCE_SHA" = "$(git rev-parse HEAD^{commit})"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Install release validation tools
+        run: |
+          python -m pip install --disable-pip-version-check \
+            'ansible-core>=2.15' 'build==1.3.0' pytest ruff 'twine==6.2.0'
+
+      - name: Fix build timestamps to the reviewed source commit
+        env:
+          SOURCE_SHA: ${{ steps.ref.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          source_date_epoch="$(git show -s --format=%ct "$SOURCE_SHA")"
+          printf '%s' "$source_date_epoch" | grep -Eq '^[0-9]+$'
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
+
+      - name: Run the release gates
+        env:
+          VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          ruff check .
+          python -m pytest tests/unit -q
+          collections="$(mktemp -d)/collections"
+          mkdir -p "$collections/ansible_collections/emersonfelipesp"
+          ln -s "$PWD" "$collections/ansible_collections/emersonfelipesp/netbox_openbao"
+          ANSIBLE_COLLECTIONS_PATH="$collections" \
+            ansible-doc -t lookup emersonfelipesp.netbox_openbao.credential > doc.txt
+          grep -q 'no_log' doc.txt
+          grep -qi 'rate limit' doc.txt
+          ansible-galaxy collection build --output-path galaxy-dist/
+          python scripts/release_policy.py verify-galaxy \
+            --directory galaxy-dist --version "$VERSION"
+          python -m build
+          python scripts/release_policy.py normalize-sdist \
+            --path "dist/netbox_openbao_ansible-${VERSION}.tar.gz" \
+            --epoch "$SOURCE_DATE_EPOCH"
+          python -m twine check dist/*
+          python scripts/release_policy.py verify-dist --directory dist --version "$VERSION"
+          smoke="$(mktemp -d)/venv"
+          python -m venv "$smoke"
+          "$smoke/bin/python" -m pip install --disable-pip-version-check 'ansible-core>=2.15' dist/*.whl
+          collections="$($smoke/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+          ANSIBLE_COLLECTIONS_PATH="$collections" \
+            "$smoke/bin/ansible-doc" -t lookup emersonfelipesp.netbox_openbao.credential >/dev/null
+
+      - name: Select the artifacts for public upload
+        env:
+          TARGET: ${{ steps.policy.outputs.target }}
+          VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$TARGET" = "pypi" ]; then
+            python scripts/release_policy.py download-testpypi \
+              --directory public-dist --version "$VERSION"
+            python scripts/release_policy.py verify-testpypi \
+              --directory dist --version "$VERSION"
+          else
+            mkdir public-dist
+            cp dist/* public-dist/
+          fi
+
+      - name: Confirm promoted artifacts equal the reviewed-source build
+        if: ${{ steps.policy.outputs.target == 'pypi' }}
+        env:
+          VERSION: ${{ steps.ref.outputs.version }}
+        run: |
+          set -euo pipefail
+          cmp --silent \
+            "dist/netbox_openbao_ansible-${VERSION}-py3-none-any.whl" \
+            "public-dist/netbox_openbao_ansible-${VERSION}-py3-none-any.whl"
+          cmp --silent \
+            "dist/netbox_openbao_ansible-${VERSION}.tar.gz" \
+            "public-dist/netbox_openbao_ansible-${VERSION}.tar.gz"
+
+      - name: Transfer the validated Python distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: public-release-dist
+          path: public-dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the validated artifacts
+    needs: validate-build
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ needs.validate-build.outputs.target }}
+    permissions:
+      contents: read
+    steps:
+      - name: Download the validated Python distributions
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: public-release-dist
+          path: dist
+
+      - name: Publish to TestPyPI with its scoped token
+        if: ${{ needs.validate-build.outputs.target == 'testpypi' }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          user: ${{ secrets.TEST_PYPI_USERNAME }}
+          password: ${{ secrets.TEST_PYPI_TOKEN }}
+          attestations: false
+
+      - name: Publish to PyPI with its scoped token
+        if: ${{ needs.validate-build.outputs.target == 'pypi' }}
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+          attestations: false

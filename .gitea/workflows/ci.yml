@@ -45,7 +45,7 @@ jobs:
           set -euo pipefail
           command -v uv
           uv venv --python 3.12 .venv
-          uv pip install --python .venv/bin/python ansible-core pytest ruff
+          uv pip install --python .venv/bin/python ansible-core build pytest ruff twine
 
       - name: Ruff
         shell: bash
@@ -79,3 +79,22 @@ jobs:
         run: |
           set -euo pipefail
           .venv/bin/ansible-galaxy collection build --output-path dist/
+          .venv/bin/python scripts/release_policy.py verify-galaxy \
+            --directory dist --version 0.1.0
+
+      - name: Build and inspect the Python distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m build --outdir python-dist/
+          .venv/bin/python -m twine check python-dist/*
+          .venv/bin/python scripts/release_policy.py verify-dist \
+            --directory python-dist --version 0.1.0
+          smoke="$(mktemp -d)/venv"
+          .venv/bin/python -m venv "$smoke"
+          "$smoke/bin/python" -m pip install --disable-pip-version-check \
+            'ansible-core>=2.15' python-dist/*.whl
+          collections="$($smoke/bin/python -c 'import site; print(site.getsitepackages()[0])')"
+          ANSIBLE_COLLECTIONS_PATH="$collections" \
+            "$smoke/bin/ansible-doc" -t lookup \
+            emersonfelipesp.netbox_openbao.credential >/dev/null

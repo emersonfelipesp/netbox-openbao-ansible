@@ -535,23 +535,24 @@ class TestLookupOptionTypes:
 
     @staticmethod
     def _documented_options():
+        import ast
+
         import yaml
 
         path = os.path.join(
             os.path.dirname(__file__), '..', '..', 'plugins', 'lookup', 'credential.py',
         )
-        namespace = {}
-        exec(  # noqa: S102 - reading the plugin's own DOCUMENTATION constant
-            compile(
-                ''.join(
-                    line for line in open(path)
-                    if not line.startswith(('from ', 'import '))
-                ).split("EXAMPLES = r'''")[0],
-                path, 'exec',
-            ),
-            namespace,
+        source = open(path, encoding='utf-8').read()
+        module = ast.parse(source, filename=path)
+        documentation = next(
+            node.value.value
+            for node in module.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'DOCUMENTATION' for target in node.targets)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
         )
-        return yaml.safe_load(namespace['DOCUMENTATION'])['options']
+        return yaml.safe_load(documentation)['options']
 
     def test_assigned_object_id_is_declared_str(self):
         """

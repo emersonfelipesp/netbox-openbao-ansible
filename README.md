@@ -1,6 +1,6 @@
 # netbox-openbao-ansible
 
-Resolve [`netbox-openbao`](https://git.nmulti.cloud/emersonfelipesp/netbox-openbao)
+Resolve [`netbox-openbao`](https://github.com/emersonfelipesp/netbox-openbao)
 credentials from NetBox at play time. The material stays in OpenBao; NetBox
 authorizes and audits every read.
 
@@ -66,9 +66,32 @@ discovering the ceiling at run time.
 
 ## Install
 
+Install the released Python distribution from PyPI:
+
 ```bash
-ansible-galaxy collection install git+https://git.nmulti.cloud/emersonfelipesp/netbox-openbao-ansible.git
+python -m pip install netbox-openbao-ansible==0.1.0
 ```
+
+The wheel installs the collection below
+`ansible_collections.emersonfelipesp.netbox_openbao`, so Ansible discovers the
+same fully qualified lookup name as a Galaxy installation. The conventional
+Galaxy source installation remains available:
+
+```bash
+ansible-galaxy collection install git+https://github.com/emersonfelipesp/netbox-openbao-ansible.git
+```
+
+For a pre-release verification from TestPyPI, install dependencies from PyPI
+and only this package from TestPyPI:
+
+```bash
+python -m pip install 'ansible-core>=2.15'
+python -m pip install --no-deps --index-url https://test.pypi.org/simple/ \
+  netbox-openbao-ansible==0.1.0
+```
+
+See [the release procedure](docs/releasing.md) for immutable publication and
+recovery rules.
 
 ## Configure
 
@@ -222,9 +245,11 @@ between them, and a separate package makes that boundary explicit.
 ## Development
 
 ```bash
-pip install ansible-core pytest ruff
+pip install ansible-core build pytest ruff twine
 pytest tests/unit          # no server needed
 ruff check .
+python -m build
+python -m twine check dist/*
 ```
 
 Against a live NetBox:

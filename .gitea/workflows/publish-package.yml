@@ -1,0 +1,75 @@
+name: Publish immutable Gitea package
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing final release tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netbox-openbao-ansible-package-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.repository == 'emersonfelipesp/netbox-openbao-ansible' && github.ref == 'refs/heads/main' }}
+    runs-on: mirror-host
+    steps:
+      - name: Checkout canonical publisher policy
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tagged source
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(\.post[1-9][0-9]*)?$'
+          git fetch --force --no-tags origin \
+            "+refs/heads/main:refs/release-policy/main" \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          python3 scripts/release_policy.py validate-ref \
+            --repository . --tag "$RELEASE_TAG" \
+            --main-ref refs/release-policy/main --github-output "$GITHUB_OUTPUT"
+
+      - name: Build and validate tagged source
+        env:
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          release_root="$(mktemp -d "$RUNNER_TEMP/netbox-openbao-ansible.XXXXXX")"
+          trap 'rm -rf -- "$release_root"' EXIT
+          git archive "$SOURCE_SHA" | tar -x -C "$release_root"
+          python3 -m venv "$release_root/.venv"
+          "$release_root/.venv/bin/python" -m pip install --disable-pip-version-check \
+            'build==1.3.0' 'twine==6.2.0'
+          "$release_root/.venv/bin/python" -m build --outdir "$release_root/dist" "$release_root"
+          "$release_root/.venv/bin/python" -m twine check "$release_root"/dist/*
+          "$release_root/.venv/bin/python" "$release_root/scripts/release_policy.py" \
+            verify-dist --directory "$release_root/dist" --version "$VERSION"
+          install -d -m 0700 release-transfer
+          cp "$release_root"/dist/*.whl "$release_root"/dist/*.tar.gz release-transfer/
+
+      - name: Publish through the repository-scoped package credential
+        env:
+          TWINE_USERNAME: emersonfelipesp
+          TWINE_PASSWORD: ${{ secrets.PACKAGE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$TWINE_PASSWORD"
+          publisher_root="$(mktemp -d "$RUNNER_TEMP/netbox-openbao-ansible-publisher.XXXXXX")"
+          trap 'rm -rf -- "$publisher_root"' EXIT
+          python3 -m venv "$publisher_root/.venv"
+          "$publisher_root/.venv/bin/python" -m pip install --disable-pip-version-check 'twine==6.2.0'
+          "$publisher_root/.venv/bin/python" -m twine upload --non-interactive \
+            --repository-url "${GITHUB_SERVER_URL%/}/api/packages/emersonfelipesp/pypi" \
+            release-transfer/*.whl release-transfer/*.tar.gz

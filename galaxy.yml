@@ -17,10 +17,27 @@ tags:
   - secrets
   - credentials
   - networking
-repository: https://git.nmulti.cloud/emersonfelipesp/netbox-openbao-ansible
-issues: https://git.nmulti.cloud/emersonfelipesp/netbox-openbao-ansible/issues
+repository: https://github.com/emersonfelipesp/netbox-openbao-ansible
+issues: https://github.com/emersonfelipesp/netbox-openbao-ansible/issues
 build_ignore:
+  - .ansible
+  - .cache
+  - .gitignore
   - .gitea
   - .github
+  - .pytest_cache
+  - .ruff_cache
+  - .uv-cache
+  - .venv
+  - build
+  - dist
+  - galaxy-dist
+  - doc.txt
+  - netbox_openbao_ansible.egg-info
+  - pyproject.toml
+  - python-dist
+  - scripts
+  - tests
   - tests/output
+  - '*.egg-info'
   - '*.tar.gz'
