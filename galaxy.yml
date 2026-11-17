@@ -20,6 +20,7 @@ tags:
 repository: https://github.com/emersonfelipesp/netbox-openbao-ansible
 issues: https://github.com/emersonfelipesp/netbox-openbao-ansible/issues
 build_ignore:
+  - AGENTS.md
   - .ansible
   - .cache
   - .gitignore
