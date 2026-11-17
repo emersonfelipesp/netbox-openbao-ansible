@@ -1,4 +1,4 @@
-name: Mirror selected branches to GitHub
+name: Propose reviewed content to GitHub
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
 
 jobs:
   mirror:
-    name: Push branch to GitHub
+    name: Propose content to GitHub
     runs-on: mirror-host
     env:
       GH_TOKEN: ${{ secrets.GH_MIRROR_TOKEN }}
@@ -52,72 +52,152 @@ jobs:
           "${sudo_cmd[@]}" apt-get install -y gh
           gh --version
 
-      - name: Mirror triggering branch
+      - name: Propose the triggering content snapshot
         shell: bash
         run: |
           set -euo pipefail
+          export GH_HOST=github.com
 
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::Missing required Gitea Actions secret GH_MIRROR_TOKEN."
-            exit 1
-          fi
-          if [ -z "${GITEA_SOURCE_TOKEN:-}" ]; then
-            echo "::error::Missing required Gitea Actions secret SOURCE_MIRROR_TOKEN."
-            exit 1
-          fi
+          validate_source_event() {
+            [[ -n "${GH_TOKEN:-}" && -n "${GITEA_SOURCE_TOKEN:-}" ]]
+            source_repository="${GITHUB_REPOSITORY:?}"
+            source_sha="${GITHUB_SHA:?}"
+            [[ "$source_repository" == emersonfelipesp/netbox-openbao-ansible ]]
+            [[ "${GITHUB_REF:?}" == refs/heads/main && "${GITHUB_REF_NAME:?}" == main ]]
+            [[ "${GITHUB_OWNER:?}" == emersonfelipesp && "$source_sha" =~ ^[0-9a-f]{40}$ ]]
+            case "${GITHUB_EVENT_NAME:?}" in
+              push) ;;
+              *) echo "Unsupported source event." >&2; return 1 ;;
+            esac
+            target_repo=emersonfelipesp/netbox-openbao-ansible
+          }
 
-          mirror_branch="${GITHUB_REF_NAME:?}"
-          source_repository="${GITHUB_REPOSITORY:?}"
+          require_source_current() {
+            local listing
+            listing="$(GIT_ASKPASS="$gitea_askpass" GIT_TERMINAL_PROMPT=0 \
+              "${publisher_env[@]}" git -C "$worktree" ls-remote --exit-code gitea refs/heads/main)"
+            [[ "$listing" == "$source_sha"$'\t'refs/heads/main ]]
+          }
 
-          case "${mirror_branch}" in
-            main)
-              ;;
-            *)
-              echo "::error::Ref ${mirror_branch} is not approved for GitHub mirroring."
-              exit 1
-              ;;
-          esac
+          read_public_main() {
+            local listing fetched expected_pattern
+            listing="$("${publisher_env[@]}" git -C "$worktree" ls-remote --exit-code github refs/heads/main)"
+            expected_pattern=$'^[0-9a-f]{40}\trefs/heads/main$'
+            [[ "$listing" =~ $expected_pattern ]]
+            public_sha="${listing%%$'\t'*}"
+            "${publisher_env[@]}" git -C "$worktree" fetch --no-tags github refs/heads/main:refs/remotes/github/main
+            fetched="$("${publisher_env[@]}" git -C "$worktree" rev-parse 'refs/remotes/github/main^{commit}')"
+            [[ "$fetched" == "$public_sha" ]]
+            [[ "$("${publisher_env[@]}" git -C "$worktree" rev-parse --is-shallow-repository)" == false ]]
+            [[ "$("${publisher_env[@]}" git -C "$worktree" merge-base "$public_sha" "$source_sha")" =~ ^[0-9a-f]{40}$ ]]
+          }
 
-          repo_name="${source_repository#*/}"
-          target_repo="${GITHUB_OWNER}/${repo_name}"
-          source_url="https://git.nmulti.cloud/${source_repository}.git"
+          require_public_current() {
+            local listing
+            listing="$("${publisher_env[@]}" git -C "$worktree" ls-remote --exit-code github refs/heads/main)"
+            [[ "$listing" == "$public_sha"$'\t'refs/heads/main ]]
+          }
+
+          inspect_existing_proposal() {
+            local information existing_number existing_branch existing_head existing_base existing_actor existing_repository extra commit_info
+            information="$("${publisher_env[@]}" gh api "repos/$target_repo/pulls?state=open&base=main&per_page=100" --jq \
+              'if length >= 100 then error("Open pull-request inventory is incomplete") else map(select(.head.ref | startswith("ci-publication/"))) | [length, (.[0].number // 0), (.[0].head.ref // "-"), (.[0].head.sha // "-"), (.[0].base.ref // "-"), (.[0].user.login // "-"), (.[0].head.repo.full_name // "-")] | map(tostring) | @tsv end')"
+            IFS=$'\t' read -r proposal_count existing_number existing_branch existing_head existing_base existing_actor existing_repository extra <<< "$information"
+            [[ "$proposal_count" =~ ^[01]$ && -z "$extra" ]]
+            if [[ "$proposal_count" == 0 ]]; then
+              return 0
+            fi
+            [[ "$existing_number" =~ ^[1-9][0-9]*$ && "$existing_base" == main ]]
+            [[ "$existing_actor" == "$publication_actor" && "$existing_repository" == "$target_repo" ]]
+            [[ "$existing_branch" == "$proposal_branch" && "$existing_head" =~ ^[0-9a-f]{40}$ ]]
+            commit_info="$("${publisher_env[@]}" gh api "repos/$target_repo/git/commits/$existing_head" \
+              --jq '[.tree.sha, (.parents|length|tostring), .parents[0].sha] | @tsv')"
+            [[ "$commit_info" == "$canonical_tree"$'\t'1$'\t'"$public_sha" ]]
+            require_source_current
+            require_public_current
+            echo "The exact content/base proposal already exists; no branch or pull request was changed."
+          }
+
+          reserve_proposal_branch() {
+            local listing status=0 reserved
+            listing="$("${publisher_env[@]}" git -C "$worktree" ls-remote --exit-code github "refs/heads/$proposal_branch")" || status=$?
+            [[ "$status" == 2 && -z "$listing" ]]
+            require_source_current
+            require_public_current
+            reserved="$("${publisher_env[@]}" gh api --method POST "repos/$target_repo/git/refs" \
+              --raw-field "ref=refs/heads/$proposal_branch" --raw-field "sha=$public_sha" --jq '.object.sha')"
+            [[ "$reserved" == "$public_sha" ]]
+          }
+
+          publish_proposal() {
+            local proposal_sha listing public_body created
+            proposal_sha="$(printf 'Propose reviewed repository content\n\nContent tree: %s\n' "$canonical_tree" | \
+              "${publisher_env[@]}" git -C "$worktree" -c user.name='Repository publication' \
+                -c user.email='repository-publication@users.noreply.github.com' \
+                commit-tree "$canonical_tree" -p "$public_sha")"
+            [[ "$proposal_sha" =~ ^[0-9a-f]{40}$ ]]
+            [[ "$("${publisher_env[@]}" git -C "$worktree" rev-parse "${proposal_sha}^{tree}")" == "$canonical_tree" ]]
+            [[ "$("${publisher_env[@]}" git -C "$worktree" rev-parse "${proposal_sha}^@")" == "$public_sha" ]]
+            "${publisher_env[@]}" git -C "$worktree" merge-base --is-ancestor "$public_sha" "$proposal_sha"
+            listing="$("${publisher_env[@]}" git -C "$worktree" ls-remote --exit-code github "refs/heads/$proposal_branch")"
+            [[ "$listing" == "$public_sha"$'\t'"refs/heads/$proposal_branch" ]]
+            require_source_current
+            require_public_current
+            "${publisher_env[@]}" git -C "$worktree" push github "$proposal_sha:refs/heads/$proposal_branch"
+            require_source_current
+            require_public_current
+            public_body="$(printf 'Propose the complete reviewed repository snapshot for normal pull-request validation.\n\nContent tree: %s\nPublic base: %s\n\nReview the complete visible delta, including removals. No source change is accepted automatically. All applicable native checks and an explicit reviewed squash merge remain required. No release or deployment is requested.\n' "$canonical_tree" "$public_sha")"
+            created="$("${publisher_env[@]}" gh api --method POST "repos/$target_repo/pulls" \
+              --raw-field title='Propose reviewed repository content' --raw-field "body=$public_body" \
+              --raw-field "head=$proposal_branch" --raw-field base=main \
+              --jq '[.head.sha, .base.ref, .base.sha] | @tsv')"
+            [[ "$created" == "$proposal_sha"$'\t'main$'\t'"$public_sha" ]]
+            echo "Created the owned content proposal; public main was not changed."
+          }
+
+          validate_source_event
           worktree="$(mktemp -d)"
           trap 'rm -rf "${worktree}"' EXIT
-          export HOME="${worktree}/home"
-          mkdir -p "${HOME}"
-          gitea_askpass="${worktree}/gitea-askpass.sh"
-          cat > "${gitea_askpass}" <<'EOF'
+          publisher_home="$worktree/home"
+          mkdir -p "$publisher_home/.config/gh"
+          publisher_env=(env -u GIT_CONFIG_PARAMETERS HOME="$publisher_home"
+            GH_CONFIG_DIR="$publisher_home/.config/gh"
+            GIT_CONFIG_GLOBAL="$publisher_home/.gitconfig" GIT_CONFIG_NOSYSTEM=1
+            GIT_CONFIG_COUNT=0 GH_HOST=github.com)
+          gitea_askpass="$worktree/gitea-askpass.sh"
+          cat > "$gitea_askpass" <<'ASKPASS'
           #!/usr/bin/env bash
           case "$1" in
             *Username*) printf '%s\n' x-access-token ;;
             *Password*) printf '%s\n' "${GITEA_SOURCE_TOKEN}" ;;
             *) printf '\n' ;;
           esac
-          EOF
-          chmod 700 "${gitea_askpass}"
-
-          git init "${worktree}"
-          git -C "${worktree}" remote add gitea "${source_url}"
-          GIT_ASKPASS="${gitea_askpass}" GIT_TERMINAL_PROMPT=0 \
-            git -C "${worktree}" fetch --no-tags gitea "refs/heads/${mirror_branch}"
-          git -C "${worktree}" checkout --detach FETCH_HEAD
-
-          gh auth status --hostname github.com
-          gh repo view "${target_repo}" --json nameWithOwner --jq '.nameWithOwner'
-          gh auth setup-git --hostname github.com --force
-
-          git -C "${worktree}" remote add github "https://github.com/${target_repo}.git"
-          if git -C "${worktree}" ls-remote --exit-code github "refs/heads/${mirror_branch}" >/dev/null 2>&1; then
-            git -C "${worktree}" fetch --no-tags github \
-              "refs/heads/${mirror_branch}:refs/remotes/github/${mirror_branch}"
-            if git -C "${worktree}" merge-base --is-ancestor "refs/remotes/github/${mirror_branch}" HEAD; then
-              git -C "${worktree}" push github "HEAD:refs/heads/${mirror_branch}"
-            elif git -C "${worktree}" merge-base --is-ancestor HEAD "refs/remotes/github/${mirror_branch}"; then
-              echo "GitHub ${mirror_branch} already contains this commit; nothing to push."
-            else
-              echo "::error::GitHub ${mirror_branch} has diverged from Gitea; refusing to overwrite a protected branch."
-              exit 1
-            fi
-          else
-            git -C "${worktree}" push github "HEAD:refs/heads/${mirror_branch}"
+          ASKPASS
+          chmod 700 "$gitea_askpass"
+          "${publisher_env[@]}" git init "$worktree"
+          "${publisher_env[@]}" git -C "$worktree" remote add gitea "https://git.nmulti.cloud/${source_repository}.git"
+          GIT_ASKPASS="$gitea_askpass" GIT_TERMINAL_PROMPT=0 \
+            "${publisher_env[@]}" git -C "$worktree" fetch --no-tags gitea refs/heads/main
+          "${publisher_env[@]}" git -C "$worktree" checkout --detach FETCH_HEAD
+          [[ "$("${publisher_env[@]}" git -C "$worktree" rev-parse HEAD)" == "$source_sha" ]]
+          canonical_tree="$("${publisher_env[@]}" git -C "$worktree" rev-parse 'HEAD^{tree}')"
+          [[ "$canonical_tree" =~ ^[0-9a-f]{40}$ ]]
+          "${publisher_env[@]}" gh auth status --hostname github.com
+          [[ "$(GH_HOST=github.com "${publisher_env[@]}" gh repo view "$target_repo" --json nameWithOwner --jq '.nameWithOwner')" == "$target_repo" ]]
+          [[ "$("${publisher_env[@]}" gh api "repos/$target_repo" --jq '.permissions.push')" == true ]]
+          publication_actor="$("${publisher_env[@]}" gh api user --jq '.login')"
+          [[ "$publication_actor" =~ ^[A-Za-z0-9][A-Za-z0-9-]*$ ]]
+          "${publisher_env[@]}" gh auth setup-git --hostname github.com --force
+          "${publisher_env[@]}" git -C "$worktree" remote add github "https://github.com/${target_repo}.git"
+          read_public_main
+          proposal_branch="ci-publication/tree-${canonical_tree:0:16}-base-${public_sha:0:16}"
+          inspect_existing_proposal
+          if [[ "$proposal_count" == 1 ]]; then
+            exit 0
           fi
+          if [[ "$("${publisher_env[@]}" git -C "$worktree" rev-parse "${public_sha}^{tree}")" == "$canonical_tree" ]]; then
+            echo "Public main already has the exact content tree; no proposal is needed."
+            exit 0
+          fi
+          reserve_proposal_branch
+          publish_proposal
